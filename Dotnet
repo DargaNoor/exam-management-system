@@ -1,0 +1,255 @@
+using System.ServiceModel;
+
+[ServiceContract]
+public interface IService
+{
+    [OperationContract]
+    string MyServiceMethod(string input);
+}
+
+
+
+
+using System;
+
+public class Service : IService
+{
+    public string MyServiceMethod(string input)
+    {
+        return $"Hello, {input}! This is a secured response.";
+    }
+}
+
+
+
+
+using System;
+using System.ServiceModel;
+using System.ServiceModel.Description;
+
+class Program
+{
+    static void Main(string[] args)
+    {
+        Uri baseAddress = new Uri("http://localhost:8080/MyService");
+
+        using (ServiceHost host = new ServiceHost(typeof(Service), baseAddress))
+        {
+            BasicHttpBinding binding = new BasicHttpBinding();
+            binding.Security.Mode = BasicHttpSecurityMode.TransportCredentialOnly;
+            binding.Security.Transport.ClientCredentialType = HttpClientCredentialType.None;
+            binding.Security.Message.ClientCredentialType = BasicHttpMessageCredentialType.UserName;
+
+            host.AddServiceEndpoint(typeof(IService), binding, "");
+
+            ServiceMetadataBehavior smb = new ServiceMetadataBehavior
+            {
+                HttpGetEnabled = true
+            };
+            host.Description.Behaviors.Add(smb);
+
+            host.Open();
+            Console.WriteLine("The service is ready at {0}", baseAddress);
+            Console.WriteLine("Press <Enter> to stop the service.");
+            Console.ReadLine();
+
+            host.Close();
+        }
+    }
+}
+
+
+
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+    <system.serviceModel>
+        <services>
+            <service name="YourNamespace.Service">
+                <endpoint address="" 
+                          binding="basicHttpBinding" 
+                          bindingConfiguration="secureHttpBinding" 
+                          contract="YourNamespace.IService" />
+                <endpoint address="mex" 
+                          binding="mexHttpBinding" 
+                          contract="IMetadataExchange" />
+            </service>
+        </services>
+        <bindings>
+            <basicHttpBinding>
+                <binding name="secureHttpBinding">
+                    <security mode="TransportCredentialOnly">
+                        <transport clientCredentialType="None" />
+                        <message clientCredentialType="UserName" />
+                    </security>
+                </binding>
+            </basicHttpBinding>
+        </bindings>
+        <behaviors>
+            <serviceBehaviors>
+                <behavior>
+                    <serviceMetadata httpGetEnabled="true" />
+                    <serviceDebug includeExceptionDetailInFaults="false" />
+                </behavior>
+            </serviceBehaviors>
+        </behaviors>
+        <serviceHostingEnvironment multipleSiteBindingsEnabled="true" />
+    </system.serviceModel>
+</configuration>
+
+
+using System;
+using System.IdentityModel.Tokens;
+using System.ServiceModel;
+using System.ServiceModel.Description;
+using System.ServiceModel.Dispatcher;
+using System.ServiceModel.Channels;
+using System.Security.Cryptography;
+using System.Text;
+
+class ClientProgram
+{
+    static void Main(string[] args)
+    {
+        var endpointAddress = new EndpointAddress("http://localhost:8080/MyService");
+
+        var binding = new BasicHttpBinding();
+        binding.Security.Mode = BasicHttpSecurityMode.TransportCredentialOnly;
+        binding.Security.Transport.ClientCredentialType = HttpClientCredentialType.None;
+        binding.Security.Message.ClientCredentialType = BasicHttpMessageCredentialType.UserName;
+
+        var factory = new ChannelFactory<IService>(binding, endpointAddress);
+
+        // Set the custom username token
+        factory.Endpoint.Behaviors.Add(new CustomUsernameTokenBehavior("your-username", "your-password"));
+
+        var client = factory.CreateChannel();
+        using (client as IDisposable)
+        {
+            try
+            {
+                var result = client.MyServiceMethod("World");
+                Console.WriteLine("Service response: " + result);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Error: " + ex.Message);
+            }
+        }
+    }
+}
+
+public class CustomUsernameTokenBehavior : IEndpointBehavior
+{
+    private readonly string username;
+    private readonly string password;
+
+    public CustomUsernameTokenBehavior(string username, string password)
+    {
+        this.username = username;
+        this.password = password;
+    }
+
+    public void AddBindingParameters(ServiceEndpoint endpoint, BindingParameterCollection bindingParameters) { }
+
+    public void ApplyClientBehavior(ServiceEndpoint endpoint, ClientRuntime clientRuntime)
+    {
+        clientRuntime.ClientMessageInspectors.Add(new CustomUsernameTokenMessageInspector(username, password));
+    }
+
+    public void ApplyDispatchBehavior(ServiceEndpoint endpoint, EndpointDispatcher endpointDispatcher) { }
+
+    public void Validate(ServiceEndpoint endpoint) { }
+}
+
+public class CustomUsernameTokenMessageInspector : IClientMessageInspector
+{
+    private readonly string username;
+    private readonly string password;
+
+    public CustomUsernameTokenMessageInspector(string username, string password)
+    {
+        this.username = username;
+        this.password = password;
+    }
+
+    public void AfterReceiveReply(ref System.ServiceModel.Channels.Message reply, object correlationState) { }
+
+    public object BeforeSendRequest(ref System.ServiceModel.Channels.Message request, IClientChannel channel)
+    {
+        // Create the UsernameToken
+        var nonce = GenerateNonce();
+        var created = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+        var passwordDigest = ComputePasswordDigest(nonce, created, password);
+
+        var token = new StringBuilder();
+        token.Append("<wsse:UsernameToken xmlns:wsse=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd\">");
+        token.AppendFormat("<wsse:Username>{0}</wsse:Username>", username);
+        token.AppendFormat("<wsse:Password Type=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest\">{0}</wsse:Password>", passwordDigest);
+        token.AppendFormat("<wsse:Nonce>{0}</wsse:Nonce>", Convert.ToBase64String(nonce));
+        token.AppendFormat("<wsu:Created xmlns:wsu=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd\">{0}</wsu:Created>", created);
+        token.Append("</wsse:UsernameToken>");
+
+        // Encrypt the token using AES128-CBC
+        var encryptedToken = EncryptToken(token.ToString(), "your-base64-encoded-aes-key-here");
+
+        // Attach the encrypted token to the request header
+        var securityHeader = new StringBuilder();
+        securityHeader.Append("<wsse:Security xmlns:wsse=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd\">");
+        securityHeader.AppendFormat("<wsse:BinarySecurityToken EncodingType=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary\" ValueType=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#UsernameToken\">{0}</wsse:BinarySecurityToken>", encryptedToken);
+        securityHeader.Append("</wsse:Security>");
+
+        var security = MessageHeader.CreateHeader("Security", "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd", securityHeader.ToString(), false);
+        request.Headers.Add(security);
+
+        return null;
+    }
+
+    private static byte[] GenerateNonce()
+    {
+        var nonce = new byte[16];
+        using (var rng = new RNGCryptoServiceProvider())
+        {
+            rng.GetBytes(nonce);
+        }
+        return nonce;
+    }
+
+    private static string ComputePasswordDigest(byte[] nonce, string created, string password)
+    {
+        var combined = new byte[nonce.Length + Encoding.UTF8.GetByteCount(created) + Encoding.UTF8.GetByteCount(password)];
+        Buffer.BlockCopy(nonce, 0, combined, 0, nonce.Length);
+        Buffer.BlockCopy(Encoding.UTF8.GetBytes(created), 0, combined, nonce.Length, Encoding.UTF8.GetByteCount(created));
+        Buffer.BlockCopy(Encoding.UTF8.GetBytes(password), 0, combined, nonce.Length + Encoding.UTF8.GetByteCount(created), Encoding.UTF8.GetByteCount(password));
+
+        using (var sha1 = new SHA1Managed())
+        {
+            return Convert.ToBase64String(sha1.ComputeHash(combined));
+        }
+    }
+
+    private static string EncryptToken(string token, string base64Key)
+    {
+        var keyBytes = Convert.FromBase64String(base64Key);
+        using (var aes = Aes.Create())
+        {
+            aes.Key = keyBytes;
+            aes.Mode = CipherMode.CBC;
+            aes.Padding = PaddingMode.PKCS7;
+            aes.GenerateIV();
+            var iv = aes.IV;
+
+            using (var encryptor = aes.CreateEncryptor(aes.Key, iv))
+            using (var ms = new System.IO.MemoryStream())
+            {
+                ms.Write(iv, 0, iv.Length);
+                using (var cs = new CryptoStream(ms, encryptor, CryptoStreamMode.Write))
+                using (var writer = new System.IO.StreamWriter(cs))
+                {
+                    writer.Write(token);
+                }
+
+                return Convert.ToBase64String(ms.ToArray());
+            }
+        }
+    }
+}
